@@ -43,7 +43,6 @@ import java.net.SocketAddress;
 import java.util.concurrent.ScheduledExecutorService;
 
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.channel.ChannelFuture;
 
 public interface ServerConnection {
 
@@ -85,9 +84,9 @@ public interface ServerConnection {
 
   RequestExecutor getRequestExecutor();
 
-  ChannelFuture shutdown();
+  void shutdown();
 
-  ChannelFuture kill();
+  void kill();
 
   boolean isConnected();
 

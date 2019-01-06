@@ -28,14 +28,16 @@
  */
 package com.impossibl.postgres.protocol.v30;
 
+import com.impossibl.postgres.protocol.io.AbstractHandler;
+import com.impossibl.postgres.protocol.io.IOHandlerContext;
+import com.impossibl.postgres.protocol.io.SocketHandler;
+
 import java.io.IOException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.SimpleChannelInboundHandler;
 
 
 class SSLQueryRequest implements ServerRequest {
@@ -67,37 +69,7 @@ class SSLQueryRequest implements ServerRequest {
     // Add special channel handler to intercept SSL request responses
     // and automatically remove it once the query is complete.
 
-    channel.pipeline().addFirst("ssl-query", new SimpleChannelInboundHandler<ByteBuf>() {
-
-      @Override
-      protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
-        try {
-
-          switch (msg.readByte()) {
-            case 'S':
-              allowed.set(true);
-              break;
-
-            case 'N':
-              allowed.set(false);
-              break;
-
-            default:
-              throw new IOException("invalid SSL response");
-          }
-
-        }
-        finally {
-
-          // Remove the handler immediately
-          channel.pipeline().remove("ssl-query");
-
-          completed.countDown();
-        }
-
-      }
-
-    });
+    channel.getPipeline().appendHandler(new SSLQueryResponseHandler(), SocketHandler.class);
 
     channel
         .writeSSLRequest()
@@ -105,4 +77,37 @@ class SSLQueryRequest implements ServerRequest {
 
   }
 
+  class SSLQueryResponseHandler extends AbstractHandler {
+    @Override
+    public void read(IOHandlerContext ctx, Object msg) throws IOException {
+
+      try {
+        ByteBuf buf = (ByteBuf) msg;
+
+        switch (buf.readByte()) {
+          case 'S':
+            allowed.set(true);
+            break;
+
+          case 'N':
+            allowed.set(false);
+            break;
+
+          default:
+            throw new IOException("invalid SSL response");
+        }
+
+      }
+      finally {
+
+        // Remove the handler immediately
+        ctx.getPipeline().removeHandler(getClass());
+
+        completed.countDown();
+      }
+    }
+  }
+
 }
+
+

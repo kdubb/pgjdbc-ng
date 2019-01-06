@@ -80,6 +80,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -90,7 +91,6 @@ import static java.util.stream.Collectors.toSet;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
-import io.netty.channel.ChannelFuture;
 
 
 public class BasicContext extends AbstractContext {
@@ -184,9 +184,11 @@ public class BasicContext extends AbstractContext {
     this.utilQueries = new HashMap<>();
   }
 
-  protected ChannelFuture shutdown() {
+  protected CompletableFuture<?> shutdown() {
 
-    return serverConnection.shutdown();
+    serverConnection.shutdown();
+
+    return CompletableFuture.completedFuture(null);
   }
 
   /**
@@ -194,7 +196,7 @@ public class BasicContext extends AbstractContext {
    * externally (i.e. without calling {@link #shutdown()}
    */
   protected void connectionClosed() {
-    shutdown().awaitUninterruptibly();
+    shutdown().join();
   }
 
   /**

@@ -36,6 +36,10 @@
 package com.impossibl.postgres.protocol.v30;
 
 import com.impossibl.postgres.protocol.Notice;
+import com.impossibl.postgres.protocol.io.IOHandler;
+import com.impossibl.postgres.protocol.io.IOPipeline;
+import com.impossibl.postgres.protocol.io.LengthFieldBasedFrameDecoder;
+import com.impossibl.postgres.protocol.io.SocketHandler;
 import com.impossibl.postgres.protocol.ssl.SSLEngineFactory;
 import com.impossibl.postgres.protocol.ssl.SSLMode;
 import com.impossibl.postgres.protocol.v30.ProtocolHandler.CommandError;
@@ -61,18 +65,10 @@ import static com.impossibl.postgres.system.Settings.CREDENTIALS_USERNAME;
 import static com.impossibl.postgres.system.Settings.DATABASE;
 import static com.impossibl.postgres.system.Settings.MAX_MESSAGE_SIZE;
 import static com.impossibl.postgres.system.Settings.MAX_MESSAGE_SIZE_DEFAULT;
-import static com.impossibl.postgres.system.Settings.PROTOCOL_SOCKET_IO;
-import static com.impossibl.postgres.system.Settings.PROTOCOL_SOCKET_IO_DEFAULT;
-import static com.impossibl.postgres.system.Settings.PROTOCOL_SOCKET_IO_THREADS;
-import static com.impossibl.postgres.system.Settings.PROTOCOL_SOCKET_IO_THREADS_DEFAULT;
 import static com.impossibl.postgres.system.Settings.PROTOCOL_TRACE;
 import static com.impossibl.postgres.system.Settings.PROTOCOL_TRACE_DEFAULT;
 import static com.impossibl.postgres.system.Settings.PROTOCOL_VERSION;
 import static com.impossibl.postgres.system.Settings.PROTOCOL_VERSION_DEFAULT;
-import static com.impossibl.postgres.system.Settings.RECEIVE_BUFFER_SIZE;
-import static com.impossibl.postgres.system.Settings.RECEIVE_BUFFER_SIZE_DEFAULT;
-import static com.impossibl.postgres.system.Settings.SEND_BUFFER_SIZE;
-import static com.impossibl.postgres.system.Settings.SEND_BUFFER_SIZE_DEFAULT;
 import static com.impossibl.postgres.system.Settings.SSL_MODE;
 import static com.impossibl.postgres.system.Settings.SSL_MODE_DEFAULT;
 import static com.impossibl.postgres.utils.Await.awaitUninterruptibly;
@@ -108,19 +104,7 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import javax.security.auth.x500.X500Principal;
 
-import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.PooledByteBufAllocator;
-import io.netty.buffer.UnpooledByteBufAllocator;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.ssl.SslHandler;
 
 
@@ -141,23 +125,34 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
 
     try {
 
-      ServerConnectionShared.Ref sharedRef = ServerConnectionShared.acquire();
-
       int maxMessageSize = config.getSetting(MAX_MESSAGE_SIZE, MAX_MESSAGE_SIZE_DEFAULT);
       boolean usePooledAllocator = config.getSetting(ALLOCATOR, ALLOCATOR_DEFAULT);
       Charset clientEncoding = Charset.forName(config.getSetting(CLIENT_ENCODING, CLIENT_ENCODING_DEFAULT));
 
-      Channel channel =
-          createChannel(address, config, sharedRef, clientEncoding, maxMessageSize, usePooledAllocator)
-              .syncUninterruptibly()
-              .channel();
+      Writer protocolTraceWriter;
+      if (config.getSetting(PROTOCOL_TRACE, PROTOCOL_TRACE_DEFAULT)) {
+        protocolTraceWriter = new BufferedWriter(new OutputStreamWriter(System.out));
+      }
+      else {
+        protocolTraceWriter = null;
+      }
+
+      IOPipeline pipeline =
+          new IOPipeline(
+              new SocketHandler(),
+              new LengthFieldBasedFrameDecoder(maxMessageSize, 1, 4, -4, 0),
+              new MessageDispatchHandler(clientEncoding, protocolTraceWriter)
+          );
+
+      pipeline.connect(address);
 
       if (sslMode != SSLMode.Disable && sslMode != SSLMode.Allow) {
 
         // Execute SSL query command
 
         SSLQueryRequest sslQueryRequest = new SSLQueryRequest();
-        channel.writeAndFlush(sslQueryRequest).syncUninterruptibly();
+        pipeline.write(sslQueryRequest);
+        pipeline.flush();
 
         boolean sslQueryCompleted = awaitUninterruptibly(DEFAULT_SSL_TIMEOUT, SECONDS, sslQueryRequest::await);
 
@@ -169,7 +164,7 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
 
           final SslHandler sslHandler = new SslHandler(sslEngine);
 
-          channel.pipeline().addFirst("ssl", sslHandler);
+          pipeline.appendHandler((IOHandler) sslHandler, SocketHandler.class);
 
           try {
 
@@ -197,11 +192,11 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
       try {
 
         Map<String, String> parameterStatuses = new HashMap<>();
-        ServerConnection serverConnection = startup(config, channel, parameterStatuses, sharedRef);
+        ServerConnection serverConnection = startup(config, pipeline, parameterStatuses);
 
         if (sslMode == SSLMode.VerifyFull) {
 
-          SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+          SslHandler sslHandler = null; //(SslHandler) pipeline.findContext(SslHandler.class).getHandler();
           if (sslHandler != null) {
 
             String hostname;
@@ -253,82 +248,7 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
 
   }
 
-  private ChannelFuture createChannel(SocketAddress address, Configuration config, ServerConnectionShared.Ref sharedRef,
-                                      Charset clientEncoding, int maxMessageSize, boolean usePooledAllocator) {
-
-    Bootstrap bootstrap;
-    if (address instanceof InetSocketAddress) {
-      bootstrap = bootstrapSocket(config, sharedRef, clientEncoding, maxMessageSize);
-    }
-    else {
-      throw new IllegalArgumentException("Unsupported socket address: " + address.getClass().getSimpleName());
-    }
-
-    bootstrap
-        .option(ChannelOption.ALLOCATOR, usePooledAllocator ? PooledByteBufAllocator.DEFAULT : UnpooledByteBufAllocator.DEFAULT);
-
-    return bootstrap.connect(address);
-  }
-
-  @SuppressWarnings("deprecation")
-  private Bootstrap bootstrapSocket(Configuration config, ServerConnectionShared.Ref sharedRef, Charset clientEncoding, int maxMessageSize) {
-
-    Class<? extends SocketChannel> channelType;
-    Class<? extends EventLoopGroup> groupType;
-    int maxThreads;
-
-    String ioMode = config.getSetting(PROTOCOL_SOCKET_IO, PROTOCOL_SOCKET_IO_DEFAULT).toLowerCase();
-    switch (ioMode) {
-      case "oio":
-        channelType = io.netty.channel.socket.oio.OioSocketChannel.class;
-        groupType = io.netty.channel.oio.OioEventLoopGroup.class;
-        maxThreads = 0;
-        break;
-
-      case "nio":
-        channelType = NioSocketChannel.class;
-        groupType = NioEventLoopGroup.class;
-        maxThreads = config.getSetting(PROTOCOL_SOCKET_IO_THREADS, PROTOCOL_SOCKET_IO_THREADS_DEFAULT);
-        break;
-
-      default:
-        throw new IllegalStateException("Unsupported io mode: " + ioMode);
-    }
-
-
-    Writer protocolTraceWriter;
-    if (config.getSetting(PROTOCOL_TRACE, PROTOCOL_TRACE_DEFAULT)) {
-      protocolTraceWriter = new BufferedWriter(new OutputStreamWriter(System.out));
-    }
-    else {
-      protocolTraceWriter = null;
-    }
-
-    Bootstrap bootstrap = new Bootstrap()
-            .group(sharedRef.get().getEventLoopGroup(groupType, maxThreads))
-            .channel(channelType)
-            .handler(new ChannelInitializer<SocketChannel>() {
-              @Override
-              protected void initChannel(SocketChannel ch) {
-                ch.pipeline().addLast(
-                    new LengthFieldBasedFrameDecoder(maxMessageSize, 1, 4, -4, 0),
-                    new MessageDispatchHandler(clientEncoding, protocolTraceWriter)
-                );
-              }
-            })
-            .option(ChannelOption.TCP_NODELAY, true);
-
-    if (config.getSetting(RECEIVE_BUFFER_SIZE, RECEIVE_BUFFER_SIZE_DEFAULT) != RECEIVE_BUFFER_SIZE_DEFAULT) {
-      bootstrap.option(ChannelOption.SO_RCVBUF, config.getSetting(RECEIVE_BUFFER_SIZE, int.class));
-    }
-    if (config.getSetting(SEND_BUFFER_SIZE, SEND_BUFFER_SIZE_DEFAULT) != SEND_BUFFER_SIZE_DEFAULT) {
-      bootstrap.option(ChannelOption.SO_SNDBUF, config.getSetting(SEND_BUFFER_SIZE, int.class));
-    }
-
-    return bootstrap;
-  }
-
-  private static ServerConnection startup(Configuration config, Channel channel, Map<String, String> startupParameterStatuses, ServerConnectionShared.Ref sharedRef) throws IOException {
+  private static ServerConnection startup(Configuration config, IOPipeline pipeline, Map<String, String> startupParameterStatuses) throws IOException {
 
     Map<String, Object> params = new HashMap<>();
     params.put(APPLICATION_NAME, config.getSetting(APPLICATION_NAME, APPLICATION_NAME_DEFAULT));
@@ -404,7 +324,7 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
       }
 
     });
-    channel.writeAndFlush(startupRequest).syncUninterruptibly();
+    pipeline.writeAndFlush(startupRequest);
 
     if (!awaitUninterruptibly(DEFAULT_STARTUP_TIMEOUT, SECONDS, startupCompleted::await)) {
       throw new IOException("Timeout starting connection");
@@ -426,7 +346,7 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
 
     protocolVersion = startupProtocolVersion.get() != null ? startupProtocolVersion.get() : protocolVersion;
 
-    return new ServerConnection(config, channel, serverInfo, protocolVersion, startupKeyData.get(), sharedRef);
+    return new ServerConnection(config, pipeline, serverInfo, protocolVersion, startupKeyData.get());
   }
 
   private void verifyHostname(String hostname, SSLSession session) throws SSLPeerUnverifiedException {
@@ -556,8 +476,8 @@ public class ServerConnectionFactory implements com.impossibl.postgres.protocol.
     }
 
     @Override
-    public void exception(Channel channel, Throwable cause) {
-      if (!channel.isOpen()) {
+    public void exception(IOPipeline pipeline, Throwable cause) {
+      if (!pipeline.isActive()) {
         ServerConnection.Listener listener = getListener();
         if (listener != null) {
           listener.closed();

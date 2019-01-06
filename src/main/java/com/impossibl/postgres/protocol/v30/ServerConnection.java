@@ -40,6 +40,8 @@ import com.impossibl.postgres.protocol.RequestExecutor;
 import com.impossibl.postgres.protocol.ServerObjectType;
 import com.impossibl.postgres.protocol.TransactionStatus;
 import com.impossibl.postgres.protocol.TypeRef;
+import com.impossibl.postgres.protocol.io.IOPipeline;
+import com.impossibl.postgres.protocol.io.SocketHandler;
 import com.impossibl.postgres.system.Configuration;
 import com.impossibl.postgres.system.ServerInfo;
 import com.impossibl.postgres.system.Version;
@@ -55,31 +57,26 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.ChannelPromise;
 
 
 class ServerConnection implements com.impossibl.postgres.protocol.ServerConnection, RequestExecutor {
 
-  private Channel channel;
+  private IOPipeline pipeline;
   private ServerInfo serverInfo;
   private Version protocolVersion;
   private KeyData keyData;
-  private ServerConnectionShared.Ref sharedRef;
   private SQLTrace sqlTrace;
 
-  ServerConnection(Configuration config, Channel channel, ServerInfo serverInfo, Version protocolVersion, KeyData keyData, ServerConnectionShared.Ref sharedRef) {
-    this.channel = channel;
+  ServerConnection(Configuration config, IOPipeline pipeline, ServerInfo serverInfo, Version protocolVersion, KeyData keyData) {
+    this.pipeline = pipeline;
     this.serverInfo = serverInfo;
     this.protocolVersion = protocolVersion;
     this.keyData = keyData;
-    this.sharedRef = sharedRef;
 
     if (config.getSetting(SQL_TRACE, SQL_TRACE_DEFAULT)) {
       sqlTrace = new SQLTrace(new OutputStreamWriter(System.out));
@@ -87,7 +84,7 @@ class ServerConnection implements com.impossibl.postgres.protocol.ServerConnecti
   }
 
   MessageDispatchHandler getMessageDispatchHandler() {
-    return (MessageDispatchHandler) channel.pipeline().context(MessageDispatchHandler.class).handler();
+    return (MessageDispatchHandler) pipeline.findContext(MessageDispatchHandler.class).getHandler();
   }
 
   @Override
@@ -106,67 +103,55 @@ class ServerConnection implements com.impossibl.postgres.protocol.ServerConnecti
   }
 
   @Override
-  public ChannelFuture shutdown() {
+  public void shutdown() {
 
-    if (!channel.isActive()) {
-      return channel.pipeline().newSucceededFuture();
-    }
+    if (!pipeline.isActive()) return;
 
     // Stop reading while we are shutting down...
-    channel.config().setOption(ChannelOption.AUTO_READ, false);
+    //channel.config().setOption(ChannelOption.AUTO_READ, false);
 
     try {
-      ChannelPromise promise = channel.newPromise();
-      new ProtocolChannel(channel, StandardCharsets.UTF_8)
-          .writeTerminate()
-          .addListener(terminated -> {
-            // Now kill & wait...
-            kill().addListener(killed -> {
-              if (killed.cause() != null) {
-                promise.setFailure(killed.cause());
-              }
-              else {
-                promise.setSuccess();
-              }
-            });
-          });
-      return promise;
+      new ProtocolChannel(pipeline.getTail(), StandardCharsets.UTF_8)
+          .writeTerminate();
     }
     catch (Exception ignore) {
     }
 
-    return kill();
+    kill();
   }
 
   @Override
-  public ChannelFuture kill() {
+  public void kill() {
 
-    if (sharedRef != null) {
-      sharedRef.release();
-      sharedRef = null;
+    try {
+      pipeline.disconnect();
     }
-
-    return channel.close();
+    catch (IOException e) {
+      e.printStackTrace();
+    }
   }
 
   @Override
   public ByteBufAllocator getAllocator() {
-    return channel.alloc();
+    return pipeline.getAllocator();
   }
 
   @Override
   public SocketAddress getRemoteAddress() {
-    return channel.remoteAddress();
+    SocketHandler socketHandler = (SocketHandler) pipeline.findContext(SocketHandler.class).getHandler();
+    return socketHandler.getSocket().getRemoteSocketAddress();
   }
+
+  private static final ScheduledExecutorService ioExecutor = Executors.newSingleThreadScheduledExecutor();
 
   @Override
   public ScheduledExecutorService getIOExecutor() {
-    return channel.eventLoop();
+    return ioExecutor;
   }
 
   @Override
   public TransactionStatus getTransactionStatus() throws IOException {
-    if (!channel.isActive()) {
+    if (!pipeline.isActive()) {
       throw new ClosedChannelException();
     }
     return getMessageDispatchHandler().getTransactionStatus();
@@ -174,7 +159,7 @@ class ServerConnection implements com.impossibl.postgres.protocol.ServerConnecti
 
   @Override
   public boolean isConnected() {
-    return channel.isActive();
+    return pipeline.isActive();
   }
 
   @Override
@@ -245,10 +230,8 @@ class ServerConnection implements com.impossibl.postgres.protocol.ServerConnecti
     submit(new CloseRequest(objectType, objectName, null));
   }
 
-  @SuppressWarnings("RedundantThrows")
   private synchronized void submit(ServerRequest request) throws IOException {
-
-    channel.writeAndFlush(request).syncUninterruptibly();
+    pipeline.writeAndFlush(request);
   }
 
 }

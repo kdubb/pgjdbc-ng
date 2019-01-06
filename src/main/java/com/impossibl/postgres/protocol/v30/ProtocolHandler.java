@@ -39,16 +39,16 @@ import com.impossibl.postgres.protocol.Notice;
 import com.impossibl.postgres.protocol.ResultField;
 import com.impossibl.postgres.protocol.TransactionStatus;
 import com.impossibl.postgres.protocol.TypeRef;
+import com.impossibl.postgres.protocol.io.IOPipeline;
 
 import java.io.IOException;
 import java.util.List;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
 
 public interface ProtocolHandler {
 
-  default void exception(Channel channel, Throwable cause) throws IOException {
+  default void exception(IOPipeline pipeline, Throwable cause) throws IOException {
     exception(cause);
   }
 

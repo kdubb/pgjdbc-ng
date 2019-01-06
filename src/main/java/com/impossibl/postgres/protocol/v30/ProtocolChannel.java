@@ -39,6 +39,8 @@ import com.impossibl.postgres.protocol.FieldFormat;
 import com.impossibl.postgres.protocol.FieldFormatRef;
 import com.impossibl.postgres.protocol.ServerObjectType;
 import com.impossibl.postgres.protocol.TypeRef;
+import com.impossibl.postgres.protocol.io.IOHandlerContext;
+import com.impossibl.postgres.protocol.io.IOPipeline;
 
 import static com.impossibl.postgres.protocol.FieldFormat.Text;
 import static com.impossibl.postgres.utils.ByteBufs.lengthEncode;
@@ -50,11 +52,6 @@ import java.nio.charset.Charset;
 import java.util.Map;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelOutboundInvoker;
-import io.netty.channel.ChannelPipeline;
 
 public class ProtocolChannel {
 
@@ -71,44 +68,36 @@ public class ProtocolChannel {
   private static final byte CLOSE_MSG_ID = 'C';
   private static final byte FUNCTION_CALL_MSG_ID = 'F';
 
-  private Channel channel;
-  private ChannelOutboundInvoker flusher;
-  private ByteBufAllocator alloc;
+  private IOHandlerContext ctx;
   private Charset charset;
 
-  public ProtocolChannel(Channel channel, Charset charset) {
-    this(channel, channel, charset);
-  }
-
-  public ProtocolChannel(Channel channel, ChannelOutboundInvoker flusher, Charset charset) {
-    this.channel = channel;
-    this.flusher = flusher;
-    this.alloc = channel.alloc();
+  public ProtocolChannel(IOHandlerContext ctx, Charset charset) {
+    this.ctx = ctx;
     this.charset = charset;
   }
 
-  ChannelPipeline pipeline() {
-    return channel.pipeline();
+  IOPipeline getPipeline() {
+    return ctx.getPipeline();
   }
 
-  ProtocolChannel flush() {
-    flusher.flush();
+  ProtocolChannel flush() throws IOException {
+    ctx.flush();
     return this;
   }
 
-  ProtocolChannel writeSSLRequest() {
+  ProtocolChannel writeSSLRequest() throws IOException {
 
-    ByteBuf msg = alloc.buffer();
+    ByteBuf msg = ctx.getAllocator().buffer();
 
     msg.writeInt(8);
     msg.writeInt(80877103);
 
-    channel.write(msg, channel.voidPromise());
+    ctx.write(msg);
 
     return this;
   }
 
-  ProtocolChannel writeStartup(int protocolMajorVersion, int protocolMinorVersion, Map<String, Object> params) {
+  ProtocolChannel writeStartup(int protocolMajorVersion, int protocolMinorVersion, Map<String, Object> params) throws IOException {
 
     ByteBuf msg = beginMessage((byte) 0);
 
@@ -129,7 +118,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writePassword(String password) {
+  ProtocolChannel writePassword(String password) throws IOException {
 
     ByteBuf msg = beginMessage(PASSWORD_MSG_ID);
 
@@ -140,7 +129,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writePassword(ByteBuf password) {
+  ProtocolChannel writePassword(ByteBuf password) throws IOException {
 
     ByteBuf msg = beginMessage(PASSWORD_MSG_ID);
 
@@ -151,16 +140,16 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeSCM(byte code) {
+  ProtocolChannel writeSCM(byte code) throws IOException {
 
-    ByteBuf msg = alloc.buffer(1);
+    ByteBuf msg = ctx.getAllocator().buffer(1);
     msg.writeByte(code);
-    channel.write(msg);
+    ctx.write(msg);
 
     return this;
   }
 
-  ProtocolChannel writeQuery(String query) {
+  ProtocolChannel writeQuery(String query) throws IOException {
 
     ByteBuf msg = beginMessage(QUERY_MSG_ID);
 
@@ -171,7 +160,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeParse(String stmtName, String query, TypeRef[] paramTypes) {
+  ProtocolChannel writeParse(String stmtName, String query, TypeRef[] paramTypes) throws IOException {
 
     ByteBuf msg = beginMessage(PARSE_MSG_ID);
 
@@ -228,7 +217,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeDescribe(ServerObjectType target, String targetName) {
+  ProtocolChannel writeDescribe(ServerObjectType target, String targetName) throws IOException {
 
     ByteBuf msg = beginMessage(DESCRIBE_MSG_ID);
 
@@ -240,7 +229,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeExecute(String portalName, int maxRows) {
+  ProtocolChannel writeExecute(String portalName, int maxRows) throws IOException {
 
     ByteBuf msg = beginMessage(EXECUTE_MSG_ID);
 
@@ -267,7 +256,7 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeClose(ServerObjectType target, String targetName) {
+  ProtocolChannel writeClose(ServerObjectType target, String targetName) throws IOException {
 
     ByteBuf msg = beginMessage(CLOSE_MSG_ID);
 
@@ -279,40 +268,40 @@ public class ProtocolChannel {
     return this;
   }
 
-  ProtocolChannel writeFlush() {
+  ProtocolChannel writeFlush() throws IOException {
 
     writeMessage(FLUSH_MSG_ID);
 
     return this;
   }
 
-  ProtocolChannel writeSync() {
+  ProtocolChannel writeSync() throws IOException {
 
     writeMessage(SYNC_MSG_ID);
 
     return this;
   }
 
-  ChannelFuture writeTerminate() {
+  void writeTerminate() throws IOException {
 
     ByteBuf msg = beginMessage(TERMINATE_MSG_ID);
 
-    return channel.writeAndFlush(msg);
+    ctx.writeAndFlush(msg);
   }
 
-  private void writeMessage(byte msgId) {
+  private void writeMessage(byte msgId) throws IOException {
 
-    ByteBuf msg = alloc.buffer(5);
+    ByteBuf msg = ctx.getAllocator().buffer(5);
 
     msg.writeByte(msgId);
     msg.writeInt(4);
 
-    channel.write(msg, channel.voidPromise());
+    ctx.write(msg);
   }
 
   private ByteBuf beginMessage(byte msgId) {
 
-    ByteBuf msg = alloc.buffer();
+    ByteBuf msg = ctx.getAllocator().buffer();
 
     if (msgId != 0)
       msg.writeByte(msgId);
@@ -324,7 +313,7 @@ public class ProtocolChannel {
     return msg;
   }
 
-  private void endMessage(ByteBuf msg) {
+  private void endMessage(ByteBuf msg) throws IOException {
 
     int endPos = msg.writerIndex();
 
@@ -336,7 +325,7 @@ public class ProtocolChannel {
 
     msg.writerIndex(endPos);
 
-    channel.write(msg, channel.voidPromise());
+    ctx.write(msg);
   }
 
   private void loadParams(ByteBuf msg, FieldFormatRef[] fieldFormats, ByteBuf[] paramBuffers) throws IOException {

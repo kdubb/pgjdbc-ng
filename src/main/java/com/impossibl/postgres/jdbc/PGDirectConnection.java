@@ -120,6 +120,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
@@ -138,7 +139,6 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelFuture;
 
 
 /**
@@ -693,7 +693,11 @@ public class PGDirectConnection extends BasicContext implements PGConnection {
 
     closeStatements();
 
-    shutdown().awaitUninterruptibly(networkTimeout > 0 ? networkTimeout : Integer.MAX_VALUE);
+    try {
+      shutdown().get(networkTimeout > 0 ? networkTimeout : Integer.MAX_VALUE, MILLISECONDS);
+    }
+    catch (Exception e) {
+    }
 
     reportClosed();
     notificationListeners.clear();
@@ -1292,7 +1296,7 @@ public class PGDirectConnection extends BasicContext implements PGConnection {
     SocketAddress serverAddress = serverConnection.getRemoteAddress();
 
     //Shutdown socket (also guarantees no more commands begin execution)
-    ChannelFuture shutdown = shutdown();
+    CompletableFuture<?> shutdown = shutdown();
 
     //Issue cancel request from separate socket (per Postgres protocol). This
     //is a convenience to the server as the abort does not depend on its
@@ -1300,7 +1304,7 @@ public class PGDirectConnection extends BasicContext implements PGConnection {
 
     executor.execute(new CancelRequestTask(serverAddress, getKeyData()));
 
-    shutdown.syncUninterruptibly();
+    shutdown.join();
 
     if (housekeeper != null)
       housekeeper.remove(cleanupKey);

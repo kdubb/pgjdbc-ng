@@ -34,6 +34,8 @@ import com.impossibl.postgres.protocol.ResultField;
 import com.impossibl.postgres.protocol.TransactionStatus;
 import com.impossibl.postgres.protocol.TypeOid;
 import com.impossibl.postgres.protocol.TypeRef;
+import com.impossibl.postgres.protocol.io.AbstractHandler;
+import com.impossibl.postgres.protocol.io.IOHandlerContext;
 
 import static com.impossibl.postgres.protocol.TransactionStatus.Active;
 import static com.impossibl.postgres.protocol.TransactionStatus.Failed;
@@ -51,13 +53,10 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import static java.util.Arrays.asList;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelPromise;
 import io.netty.util.ReferenceCountUtil;
 
 
-public class MessageDispatchHandler extends ChannelDuplexHandler {
+public class MessageDispatchHandler extends AbstractHandler {
 
   private TransactionStatus transactionStatus;
   private Deque<ProtocolHandler> protocolHandlers;
@@ -81,7 +80,7 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
   }
 
   @Override
-  public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws IOException {
+  public void write(IOHandlerContext ctx, Object msg) throws IOException {
 
     if (msg instanceof ServerRequest) {
 
@@ -98,9 +97,7 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
 
       // Execute the request
 
-      request.execute(new ProtocolChannel(ctx.channel(), ctx, charset));
-
-      promise.setSuccess();
+      request.execute(new ProtocolChannel(ctx.getPipeline().getTail(), charset));
     }
     else if (msg instanceof ByteBuf) {
 
@@ -110,7 +107,7 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
 
       trace('<', (char) buf.getByte(0));
 
-      ctx.write(msg,  promise);
+      ctx.write(msg);
 
       requiresFlush = true;
     }
@@ -118,17 +115,17 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
   }
 
   @Override
-  public void flush(ChannelHandlerContext ctx) throws Exception {
+  public void flush(IOHandlerContext ctx) throws IOException {
     trace("\n");
     flushTrace();
     if (requiresFlush) {
       super.flush(ctx);
-      requiresFlush = false;
+      //requiresFlush = false;
     }
   }
 
   @Override
-  public void channelRead(ChannelHandlerContext ctx, Object message) throws IOException {
+  public void read(IOHandlerContext ctx, Object message) throws IOException {
 
     ByteBuf msg = (ByteBuf) message;
     try {
@@ -153,20 +150,22 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
   }
 
   @Override
-  public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+  public void readComplete(IOHandlerContext ctx) throws IOException {
     trace("\n");
     flushTrace();
-    super.channelReadComplete(ctx);
+    super.readComplete(ctx);
   }
 
   @Override
-  public void channelInactive(ChannelHandlerContext ctx) {
+  public void close(IOHandlerContext ctx) throws IOException {
 
     exceptionCaught(ctx, new ClosedChannelException());
+
+    super.close(ctx);
   }
 
   @Override
-  public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+  public void exceptionCaught(IOHandlerContext ctx, Throwable cause) {
 
     // Dispatch to current request handler (if any)
 
@@ -176,14 +175,14 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
     if (handler == null) return;
 
     try {
-      handler.exception(ctx.channel(), cause);
+      handler.exception(ctx.getPipeline(), cause);
     }
     catch (IOException ignored) {
     }
 
   }
 
-  private void dispatch(ChannelHandlerContext ctx, byte id, ByteBuf data, ProtocolHandler protocolHandler) throws IOException {
+  private void dispatch(IOHandlerContext ctx, byte id, ByteBuf data, ProtocolHandler protocolHandler) throws IOException {
 
     ProtocolHandler.Action action = null;
 
@@ -207,8 +206,7 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
         // Try default handler (which should always return Resume)
         action = parseAndDispatch(ctx, id, data.resetReaderIndex(), defaultHandler);
         if (action != ProtocolHandler.Action.Resume) {
-          String failMessage = "Unhandled message: " + (char) id + " @ " + protocolHandler.getClass().getName();
-          throw new IllegalStateException(failMessage);
+          throw new IllegalStateException("Unhandled message: " + (char) id);
         }
       }
       return;
@@ -279,7 +277,7 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
    * Message dispatching & parsing
    */
 
-  private ProtocolHandler.Action parseAndDispatch(ChannelHandlerContext ctx, byte id, ByteBuf data, ProtocolHandler handler) throws IOException {
+  private ProtocolHandler.Action parseAndDispatch(IOHandlerContext ctx, byte id, ByteBuf data, ProtocolHandler handler) throws IOException {
 
     switch (id) {
       case NOTIFICATION_MSG_ID:
@@ -388,9 +386,9 @@ public class MessageDispatchHandler extends ChannelDuplexHandler {
     return handler.negotiate(minorProtocol, asList(unsupportedParameters));
   }
 
-  private ProtocolHandler.Action receiveAuthentication(ChannelHandlerContext ctx, ByteBuf buffer, ProtocolHandler.Authentication handler) throws IOException {
+  private ProtocolHandler.Action receiveAuthentication(IOHandlerContext ctx, ByteBuf buffer, ProtocolHandler.Authentication handler) throws IOException {
 
-    ProtocolChannel protocolChannel = new ProtocolChannel(ctx.channel(), ctx, charset);
+    ProtocolChannel protocolChannel = new ProtocolChannel(ctx.getPipeline().getTail(), charset);
 
     int code = buffer.readInt();
     switch (code) {

@@ -29,7 +29,6 @@
 package com.impossibl.postgres.jdbc;
 
 import com.impossibl.postgres.api.jdbc.PGConnection;
-import com.impossibl.postgres.protocol.v30.ServerConnectionShared;
 import com.impossibl.postgres.system.ServerConnectionInfo;
 import com.impossibl.postgres.system.Version;
 import com.impossibl.postgres.types.SharedRegistry;
@@ -175,7 +174,6 @@ public class PGDriver implements Driver, DriverAction {
       }
     }
 
-    ServerConnectionShared.acquire().get().waitForShutdown();
   }
 
 }
